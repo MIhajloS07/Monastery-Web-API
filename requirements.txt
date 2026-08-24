@@ -1,0 +1,8 @@
+flask
+flasgger
+flask-swagger-ui
+gunicorn
+flask_sqlalchemy
+pymysql
+flask-migrate
+

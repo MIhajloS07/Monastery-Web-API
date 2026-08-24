@@ -1,6 +1,9 @@
 from flask import Flask, jsonify, request, redirect
 from flasgger import Swagger
 from Models.Monastery import Monastery
+from Models.Monastery import db
+from flask_migrate import Migrate
+import os
 from exceptions import (
     MonasteryError,
     DbConnectionError,
@@ -49,6 +52,33 @@ swagger_template = {
 app = Flask(__name__)
 swagger = Swagger(app, template=swagger_template)
 
+# db config
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
+    'SQLALCHEMY_DATABASE_URI',
+    'mysql+pymysql://user:[REDACTED]@db/monastery_db'  # fallback
+)
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db.init_app(app)
+migrate = Migrate(app, db)
+
+# Create tables on startup (wrap in try-except for startup safety)
+def init_db():
+    try:
+        with app.app_context():
+            db.create_all()
+    except Exception as e:
+        print(f"Database initialization warning: {e}")
+
+@app.before_request
+def ensure_db_initialized():
+    """Lazy initialization of database"""
+    try:
+        with app.app_context():
+            db.create_all()
+    except Exception:
+        pass  # Silently fail if DB not ready yet
+
 @app.route('/')
 def index():
     return redirect('/apidocs')  # Redirect to Swagger UI
@@ -69,10 +99,7 @@ def get_monasteries():
             $ref: '#/definitions/Monastery'
     """
     monasteries = Monastery.get_all()
-    if not monasteries:
-        raise MonasteryNotFoundError("No monasteries found")
-    else:
-        return jsonify([monastery.__dict__ for monastery in monasteries]), 200 #response -> OK
+    return jsonify([monastery.to_dict() for monastery in monasteries] if monasteries else []), 200 #response -> OK
  
 @app.route('/api/monasteries/<int:id>', methods=['GET'])
 def get_monastery_by_id(id):
@@ -101,7 +128,7 @@ def get_monastery_by_id(id):
     monastery = Monastery.get_by_id(id)
     if not monastery:
         raise MonasteryNotFoundError("Monastery not found")
-    return jsonify(monastery.__dict__), 200 # response -> OK
+    return jsonify(monastery.to_dict()), 200 # response -> OK
 
 @app.route('/api/monasteries/location/<string:location>', methods=['GET'])
 def get_monasteries_by_location(location):
@@ -126,9 +153,8 @@ def get_monasteries_by_location(location):
     """
     monasteries = Monastery.get_by_location(location)
     if not monasteries:
-        raise MonasteryNotFoundError("No monasteries found for the specified location")
-    else:
-        return jsonify([monastery.__dict__ for monastery in monasteries]), 200 # response -> OK
+        return jsonify([]), 200  # Return empty array if none found
+    return jsonify([monastery.to_dict() for monastery in monasteries]), 200 # response -> OK
 
 @app.route('/api/monasteries/year/<int:year>', methods=['GET'])
 def get_monasteries_by_year_of_construction(year):
@@ -158,8 +184,8 @@ def get_monasteries_by_year_of_construction(year):
     """
     monasteries = Monastery.get_by_year_of_construction(year)
     if not monasteries:
-        raise MonasteryNotFoundError(f"No monasteries found for year {year}")
-    return jsonify([m.__dict__ for m in monasteries]), 200
+        return jsonify([]), 200  # Return empty array if none found
+    return jsonify([m.to_dict() for m in monasteries]), 200
 
 @app.route('/api/monasteries/name/<string:name>', methods=['GET'])
 def get_monasteries_by_name(name):
@@ -186,8 +212,8 @@ def get_monasteries_by_name(name):
     """
     monasteries = Monastery.get_by_name(name)
     if not monasteries:
-        raise MonasteryNotFoundError(f"No monasteries found for name {name}")
-    return jsonify([m.__dict__ for m in monasteries]), 200
+        return jsonify([]), 200  # Return empty array if none found
+    return jsonify([m.to_dict() for m in monasteries]), 200
 
 @app.route('/api/monasteries', methods=['POST'])
 def add_monastery():
@@ -212,13 +238,12 @@ def add_monastery():
     if "name" not in data or "location" not in data or "year_of_construction" not in data:
         raise MonasterySaveError("Missing required fields: name, location, or year_of_construction")
     new_monastery = Monastery(
-        id=get_first_free_id(),
         name=data["name"],
         location=data["location"],
         year_of_construction=data.get("year_of_construction")
     )
     new_monastery.save()
-    return jsonify(new_monastery.__dict__), 201 # response -> Created
+    return jsonify(new_monastery.to_dict()), 201 # response -> Created
 
 @app.route('/api/monasteries/<int:id>', methods=['PUT'])
 def update_monastery(id):
@@ -257,14 +282,13 @@ def update_monastery(id):
     for field in required_fields:
       if field not in data:
         raise MonasteryUpdateError(f"Missing field: {field}")
-    Monastery.update(
-        id,
+    monastery.update(
         data["name"],
         data["location"],
         data["year_of_construction"]
     )
     updated = Monastery.get_by_id(id)
-    return jsonify(updated.__dict__), 200 # response -> OK
+    return jsonify(updated.to_dict()), 200 # response -> OK
 
 @app.route('/api/monasteries/<int:id>', methods=['PATCH'])
 def patch_monastery(id):
@@ -303,9 +327,9 @@ def patch_monastery(id):
     location = data.get("location", monastery.location)
     year = data.get("year_of_construction", monastery.year_of_construction)
 
-    Monastery.update(id, name, location, year)
+    monastery.update(name, location, year)
     updated = Monastery.get_by_id(id)
-    return jsonify(updated.__dict__), 200 # -> OK
+    return jsonify(updated.to_dict()), 200 # -> OK
 
 @app.route('/api/monasteries/<int:id>', methods=['DELETE'])
 def delete_monastery(id):
@@ -332,19 +356,8 @@ def delete_monastery(id):
     monastery = Monastery.get_by_id(id)
     if not monastery:
         raise MonasteryNotFoundError("Monastery not found")
-    Monastery.delete(id) 
+    monastery.delete()
     return jsonify({"message": "Monastery deleted"}), 200 # response -> OK
-
-# helper method
-def get_first_free_id():
-    existing_ids = [m.id for m in Monastery.get_all()]
-    if not existing_ids:
-      return 1
-    existing_ids.sort()
-    for i in range(1, max(existing_ids) + 1):
-      if i not in existing_ids:
-        return i
-    return max(existing_ids) + 1
   
 # handle errors in json format
 @app.errorhandler(MonasteryError)
